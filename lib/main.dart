@@ -158,9 +158,10 @@ class RestaurantHome extends StatelessWidget {
         final open = session.profile['accepting'] == 'مفتوح';
         return Scaffold(
             appBar: AppBar(
+                leading: Padding(padding: const EdgeInsets.all(8), child: InkWell(onTap: () => pickLogo(context, session), child: MaaImage(b64: session.profile['logoB64'] as String?, width: 40, height: 40, radius: 20, color: Colors.white))),
                 title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Text(session.name, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w900)),
-                  Text(session.publicId, style: const TextStyle(fontSize: 12))
+                  Text('${session.publicId}  •  ${session.profile['governorate'] ?? ''} ${session.profile['area'] ?? ''}', style: const TextStyle(fontSize: 12))
                 ]),
                 actions: const [MaaNotificationButton(role: 'restaurant', accent: orange)]),
             body: StreamBuilder<List<Map<String, dynamic>>>(
@@ -186,6 +187,24 @@ class RestaurantHome extends StatelessWidget {
                               activeThumbColor: green,
                               onChanged: (v) => session.profileRef.update({'accepting': v ? 'مفتوح' : 'مغلق مؤقتًا', 'lastActivity': maaNow()}))
                         ])),
+                    if ('${session.profile['logoB64'] ?? ''}'.isEmpty || session.profile['lat'] is! num)
+                      Card(
+                          color: const Color(0xFFFFF3E0),
+                          elevation: 0,
+                          margin: const EdgeInsets.only(top: 12),
+                          child: Padding(
+                              padding: const EdgeInsets.all(12),
+                              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                const Text('أكمل ملف مطعمك ليظهر للعملاء', style: TextStyle(fontWeight: FontWeight.w900)),
+                                const SizedBox(height: 8),
+                                Row(children: [
+                                  if ('${session.profile['logoB64'] ?? ''}'.isEmpty)
+                                    Expanded(child: OutlinedButton.icon(onPressed: () => pickLogo(context, session), icon: const Icon(Icons.image_outlined), label: const Text('رفع الشعار'))),
+                                  if ('${session.profile['logoB64'] ?? ''}'.isEmpty && session.profile['lat'] is! num) const SizedBox(width: 8),
+                                  if (session.profile['lat'] is! num)
+                                    Expanded(child: OutlinedButton.icon(onPressed: () async { final p = await maaCurrentPosition(); if (p != null) await session.profileRef.update({'lat': p.lat, 'lng': p.lng}); }, icon: const Icon(Icons.my_location), label: const Text('تحديد الموقع'))),
+                                ]),
+                              ]))),
                     const SizedBox(height: 12),
                     Row(children: [
                       Expanded(child: SmallStat(title: 'طلبات اليوم', value: '${todays.length}', icon: Icons.receipt_long)),
@@ -223,6 +242,17 @@ class RestaurantHome extends StatelessWidget {
                   ]);
                 }));
       });
+}
+
+Future<void> pickLogo(BuildContext context, MaaSession session) async {
+  try {
+    final b = await maaPickImageB64(maxSide: 300, quality: 70);
+    if (b != null) await session.profileRef.update({'logoB64': b});
+  } catch (e) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))));
+    }
+  }
 }
 
 class SmallStat extends StatelessWidget {
@@ -326,76 +356,190 @@ class RestaurantMenu extends StatelessWidget {
   const RestaurantMenu({super.key, required this.session});
   final MaaSession session;
 
-  Future<void> _edit(BuildContext context, [DocumentSnapshot<Map<String, dynamic>>? doc]) async {
-    final data = doc?.data() ?? {};
-    final name = TextEditingController(text: '${data['name'] ?? ''}');
-    final desc = TextEditingController(text: '${data['description'] ?? ''}');
-    final price = TextEditingController(text: data['price'] == null ? '' : '${data['price']}');
+  Future<void> _open(BuildContext context, List<String> categories,
+      [DocumentSnapshot<Map<String, dynamic>>? doc]) {
+    return Navigator.push(
+        context,
+        MaterialPageRoute<void>(
+            builder: (_) => Directionality(
+                textDirection: TextDirection.rtl,
+                child: ItemEditorPage(session: session, categories: categories, doc: doc))));
+  }
+
+  @override
+  Widget build(BuildContext context) => StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: session.db.collection('menuItems').where('restaurantUid', isEqualTo: session.uid).snapshots(),
+      builder: (context, snap) {
+        final docs = snap.data?.docs ?? const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+        final categories = <String>{for (final d in docs) '${d.data()['category'] ?? 'عام'}'}.toList()..sort();
+        final grouped = <String, List<QueryDocumentSnapshot<Map<String, dynamic>>>>{};
+        for (final d in docs) {
+          grouped.putIfAbsent('${d.data()['category'] ?? 'عام'}', () => []).add(d);
+        }
+        return Scaffold(
+            appBar: AppBar(title: const Text('قائمتي')),
+            floatingActionButton: FloatingActionButton.extended(
+                backgroundColor: orange,
+                foregroundColor: Colors.white,
+                onPressed: () => _open(context, categories),
+                icon: const Icon(Icons.add),
+                label: const Text('إضافة صنف')),
+            body: snap.hasError
+                ? const Center(child: Text('تعذر تحميل القائمة.'))
+                : !snap.hasData
+                    ? const Center(child: CircularProgressIndicator())
+                    : docs.isEmpty
+                        ? const Center(child: Padding(padding: EdgeInsets.all(28), child: Text('لم تضف أصنافًا بعد.\nاضغط «إضافة صنف» وحدد القسم والاسم والوصف والصورة.', textAlign: TextAlign.center, style: TextStyle(height: 1.7))))
+                        : ListView(padding: const EdgeInsets.fromLTRB(16, 16, 16, 90), children: [
+                            for (final entry in grouped.entries) ...[
+                              Padding(padding: const EdgeInsets.only(top: 8, bottom: 6), child: Text(entry.key, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: plum))),
+                              for (final d in entry.value) _ItemCard(doc: d, onEdit: () => _open(context, categories, d)),
+                            ]
+                          ]));
+      });
+}
+
+class _ItemCard extends StatelessWidget {
+  const _ItemCard({required this.doc, required this.onEdit});
+  final QueryDocumentSnapshot<Map<String, dynamic>> doc;
+  final VoidCallback onEdit;
+  @override
+  Widget build(BuildContext context) {
+    final m = doc.data();
+    final available = m['available'] != false;
+    return Card(
+        color: Colors.white,
+        elevation: 0,
+        child: ListTile(
+            onTap: onEdit,
+            leading: MaaImage(b64: m['imageB64'] as String?, width: 56, height: 56, color: orange),
+            title: Text('${m['name']}', style: TextStyle(fontWeight: FontWeight.bold, color: available ? Colors.black : Colors.black45)),
+            subtitle: Text('${maaMoney(maaNum(m['price']))}${available ? '' : '  •  متوقف مؤقتًا'}'),
+            trailing: Switch(value: available, activeThumbColor: green, onChanged: (v) => doc.reference.update({'available': v}))));
+  }
+}
+
+class ItemEditorPage extends StatefulWidget {
+  const ItemEditorPage({super.key, required this.session, required this.categories, this.doc});
+  final MaaSession session;
+  final List<String> categories;
+  final DocumentSnapshot<Map<String, dynamic>>? doc;
+  @override
+  State<ItemEditorPage> createState() => _ItemEditorPageState();
+}
+
+class _ItemEditorPageState extends State<ItemEditorPage> {
+  late final Map<String, dynamic> data = widget.doc?.data() ?? {};
+  late final name = TextEditingController(text: '${data['name'] ?? ''}');
+  late final desc = TextEditingController(text: '${data['description'] ?? ''}');
+  late final price = TextEditingController(text: data['price'] == null ? '' : '${data['price']}');
+  late final newCategory = TextEditingController();
+  late String category = '${data['category'] ?? ''}';
+  String? image;
+  bool available = true;
+  bool busy = false;
+  String error = '';
+
+  @override
+  void initState() {
+    super.initState();
+    image = data['imageB64'] as String?;
+    available = data['available'] != false;
+    if (category.isEmpty && widget.categories.isNotEmpty) category = widget.categories.first;
+  }
+
+  Future<void> _pick() async {
+    try {
+      final b = await maaPickImageB64();
+      if (b != null) setState(() => image = b);
+    } catch (e) {
+      setState(() => error = e.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
+  Future<void> _save() async {
+    final cat = newCategory.text.trim().isNotEmpty ? newCategory.text.trim() : category;
+    final p = num.tryParse(price.text.trim());
+    if (cat.isEmpty) return setState(() => error = 'اختر القسم أو اكتب قسمًا جديدًا.');
+    if (name.text.trim().isEmpty) return setState(() => error = 'اكتب اسم الصنف.');
+    if (p == null || p < 0) return setState(() => error = 'اكتب سعرًا صحيحًا.');
+    setState(() { busy = true; error = ''; });
+    final fields = <String, dynamic>{
+      'name': name.text.trim(),
+      'description': desc.text.trim(),
+      'price': p,
+      'category': cat,
+      'imageB64': image ?? '',
+      'available': available,
+    };
+    try {
+      if (widget.doc != null) {
+        await widget.doc!.reference.update(fields);
+      } else {
+        await widget.session.db.collection('menuItems').add({
+          ...fields,
+          'restaurantUid': widget.session.uid,
+          'restaurantId': widget.session.publicId,
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+      }
+      if (mounted) Navigator.pop(context);
+    } catch (_) {
+      if (mounted) setState(() => error = 'تعذر الحفظ. تأكد من الاتصال وأن الحساب مفعّل.');
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> _delete() async {
     final ok = await showDialog<bool>(
         context: context,
         builder: (ctx) => Directionality(
             textDirection: TextDirection.rtl,
             child: AlertDialog(
-              title: Text(doc == null ? 'إضافة صنف' : 'تعديل الصنف'),
-              content: SingleChildScrollView(
-                  child: Column(mainAxisSize: MainAxisSize.min, children: [
-                TextField(controller: name, decoration: const InputDecoration(labelText: 'اسم الصنف')),
-                TextField(controller: desc, decoration: const InputDecoration(labelText: 'الوصف')),
-                TextField(controller: price, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'السعر (ج.م)')),
-              ])),
+              title: const Text('حذف الصنف؟'),
+              content: Text('سيُحذف «${data['name']}» نهائيًا. يمكنك بدلًا من ذلك إيقافه مؤقتًا.'),
               actions: [
-                if (doc != null)
-                  TextButton(
-                      onPressed: () async {
-                        await doc.reference.delete();
-                        if (ctx.mounted) Navigator.pop(ctx, false);
-                      },
-                      child: const Text('حذف', style: TextStyle(color: Color(0xFFC62828)))),
                 TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
-                FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('حفظ')),
+                FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('حذف')),
               ],
             )));
-    final p = num.tryParse(price.text.trim());
-    if (ok != true || name.text.trim().isEmpty || p == null) return;
-    final fields = {'name': name.text.trim(), 'description': desc.text.trim(), 'price': p};
-    if (doc != null) {
-      await doc.reference.update(fields);
-    } else {
-      await session.db.collection('menuItems').add({
-        ...fields,
-        'restaurantUid': session.uid,
-        'restaurantId': session.publicId,
-        'available': true,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
+    if (ok == true) {
+      await widget.doc!.reference.delete();
+      if (mounted) Navigator.pop(context);
     }
   }
 
   @override
   Widget build(BuildContext context) => Scaffold(
-      appBar: AppBar(title: const Text('قائمتي'), actions: [IconButton(onPressed: () => _edit(context), icon: const Icon(Icons.add))]),
-      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-          stream: session.db.collection('menuItems').where('restaurantUid', isEqualTo: session.uid).snapshots(),
-          builder: (context, snap) {
-            if (snap.hasError) return const Center(child: Text('تعذر تحميل القائمة.'));
-            if (!snap.hasData) return const Center(child: CircularProgressIndicator());
-            final docs = snap.data!.docs;
-            if (docs.isEmpty) return const Center(child: Text('أضف أول صنف بالضغط على +'));
-            return ListView(
-                padding: const EdgeInsets.all(16),
-                children: docs.map((d) {
-              final m = d.data();
-              return Card(
-                  color: Colors.white,
-                  elevation: 0,
-                  child: ListTile(
-                      onTap: () => _edit(context, d),
-                      leading: CircleAvatar(backgroundColor: orange.withValues(alpha: .13), child: const Icon(Icons.restaurant, color: orange)),
-                      title: Text('${m['name']}', style: const TextStyle(fontWeight: FontWeight.bold)),
-                      subtitle: Text(maaMoney(maaNum(m['price']))),
-                      trailing: Switch(value: m['available'] != false, onChanged: (v) => d.reference.update({'available': v}))));
-            }).toList());
-          }));
+      appBar: AppBar(title: Text(widget.doc == null ? 'إضافة صنف' : 'تعديل الصنف'), actions: [
+        if (widget.doc != null) IconButton(onPressed: _delete, icon: const Icon(Icons.delete_outline))
+      ]),
+      body: ListView(padding: const EdgeInsets.all(18), children: [
+        Center(
+            child: InkWell(
+                onTap: _pick,
+                child: Stack(alignment: Alignment.bottomLeft, children: [
+                  MaaImage(b64: image, width: 150, height: 150, radius: 20, fallback: Icons.add_a_photo, color: orange),
+                  const CircleAvatar(radius: 16, backgroundColor: orange, child: Icon(Icons.edit, size: 16, color: Colors.white)),
+                ]))),
+        const SizedBox(height: 6),
+        const Center(child: Text('صورة الصنف', style: TextStyle(color: Colors.black54, fontSize: 12))),
+        const SizedBox(height: 14),
+        if (widget.categories.isNotEmpty)
+          DropdownButtonFormField<String>(
+              initialValue: widget.categories.contains(category) ? category : null,
+              decoration: const InputDecoration(labelText: 'القسم'),
+              items: [for (final c in widget.categories) DropdownMenuItem(value: c, child: Text(c))],
+              onChanged: (v) => setState(() => category = v ?? '')),
+        TextField(controller: newCategory, decoration: InputDecoration(labelText: widget.categories.isEmpty ? 'القسم (مثال: وجبات، مشروبات)' : 'أو قسم جديد (اختياري)')),
+        TextField(controller: name, decoration: const InputDecoration(labelText: 'اسم الصنف')),
+        TextField(controller: desc, maxLines: 3, decoration: const InputDecoration(labelText: 'الوصف')),
+        TextField(controller: price, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'السعر (ج.م)')),
+        SwitchListTile(contentPadding: EdgeInsets.zero, title: const Text('متاح للطلب'), subtitle: const Text('أوقفه مؤقتًا إذا انتهت الكمية'), value: available, activeThumbColor: green, onChanged: (v) => setState(() => available = v)),
+        if (error.isNotEmpty) Padding(padding: const EdgeInsets.only(bottom: 8), child: Text(error, style: const TextStyle(color: Color(0xFFC62828)))),
+        FilledButton(onPressed: busy ? null : _save, style: FilledButton.styleFrom(backgroundColor: orange, minimumSize: const Size.fromHeight(52)), child: busy ? const SizedBox(height: 22, width: 22, child: CircularProgressIndicator(strokeWidth: 2.4, color: Colors.white)) : const Text('حفظ')),
+      ]));
 }
 
 class RestaurantReports extends StatelessWidget {
@@ -459,6 +603,8 @@ class RestaurantMore extends StatelessWidget {
     final phone = TextEditingController(text: session.phone);
     final address = TextEditingController(text: session.address);
     final cuisine = TextEditingController(text: '${p['cuisine'] ?? ''}');
+    final area = TextEditingController(text: '${p['area'] ?? ''}');
+    String governorate = '${p['governorate'] ?? ''}';
     final fee = TextEditingController(text: '${p['deliveryFee'] ?? 15}');
     final min = TextEditingController(text: '${p['minOrder'] ?? 0}');
     final prep = TextEditingController(text: '${p['prepTime'] ?? '25–35 دقيقة'}');
@@ -473,6 +619,8 @@ class RestaurantMore extends StatelessWidget {
                 TextField(controller: name, decoration: const InputDecoration(labelText: 'اسم المطعم')),
                 TextField(controller: phone, decoration: const InputDecoration(labelText: 'الهاتف')),
                 TextField(controller: address, decoration: const InputDecoration(labelText: 'العنوان')),
+                StatefulBuilder(builder: (c, set) => DropdownButtonFormField<String>(initialValue: governorate.isEmpty ? null : governorate, isExpanded: true, decoration: const InputDecoration(labelText: 'المحافظة'), items: [for (final g in maaGovernorates) DropdownMenuItem(value: g, child: Text(g))], onChanged: (v) => set(() => governorate = v ?? ''))),
+                TextField(controller: area, decoration: const InputDecoration(labelText: 'المنطقة')),
                 TextField(controller: cuisine, decoration: const InputDecoration(labelText: 'نوع المطبخ (مثال: مشويات)')),
                 TextField(controller: fee, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'رسوم التوصيل (ج.م)')),
                 TextField(controller: min, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'الحد الأدنى للطلب (ج.م)')),
@@ -489,6 +637,8 @@ class RestaurantMore extends StatelessWidget {
       'phone': phone.text.trim(),
       'address': address.text.trim(),
       'cuisine': cuisine.text.trim(),
+      'governorate': governorate,
+      'area': area.text.trim(),
       'deliveryFee': num.tryParse(fee.text.trim()) ?? 15,
       'minOrder': num.tryParse(min.text.trim()) ?? 0,
       'prepTime': prep.text.trim(),
@@ -499,6 +649,7 @@ class RestaurantMore extends StatelessWidget {
   Widget build(BuildContext context) => Scaffold(
       appBar: AppBar(title: const Text('المزيد')),
       body: ListView(padding: const EdgeInsets.all(16), children: [
+        MoreTile(icon: Icons.image_outlined, label: 'تغيير شعار المطعم', onTap: () => pickLogo(context, session)),
         MoreTile(icon: Icons.settings_outlined, label: 'إعدادات المطعم والتوصيل', onTap: () => _settings(context)),
         MoreTile(
             icon: Icons.support_agent,
